@@ -359,6 +359,9 @@ final class FeedModel {
     private(set) var batchTotal = 0
     private(set) var batchDone = 0
     @ObservationIgnored private var batchStarted = Date()
+    /// Held while a fetch run is active so App Nap doesn't throttle the request gate's timers
+    /// when the window is in the background (a background refresh took 5x longer without it).
+    @ObservationIgnored private var activity: NSObjectProtocol?
     /// Bumped on every applied batch; derived feeds are memoized against it.
     private(set) var version = 0
 
@@ -457,6 +460,7 @@ final class FeedModel {
             batchTotal = 0
             batchDone = 0
             batchStarted = Date()
+            activity = activity ?? ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Loading channel feeds")
         }
         batchTotal += due.count
         inFlight.formUnion(due)
@@ -496,6 +500,8 @@ final class FeedModel {
             batchDone += pendingDone.count
             if inFlight.isEmpty, batchTotal > 0 {
                 Diagnostics.write(String(format: "feed: %d channel fetches in %.1fs", batchTotal, Date().timeIntervalSince(batchStarted)))
+                if let activity { ProcessInfo.processInfo.endActivity(activity) }
+                activity = nil
             }
             pendingPages = [:]
             pendingFailures = [:]

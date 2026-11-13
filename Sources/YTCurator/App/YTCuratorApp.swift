@@ -121,6 +121,7 @@ struct MainView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .animation(.snappy, value: columnVisibility)
+            .onChange(of: columnVisibility) { old, new in Diagnostics.write("sidebar: \(old) -> \(new) route=\(app.route)") }
             .inspector(isPresented: $app.showInspector) {
                 PlaylistInspector()
                     .toolbar {

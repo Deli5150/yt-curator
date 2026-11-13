@@ -7,6 +7,15 @@ YouTube access is unofficial: you sign in on the real Google page inside the app
 cookies drive YouTube's internal web API (InnerTube). No API key or OAuth app is involved, and
 nothing leaves your Mac except requests to YouTube and GitHub (update checks).
 
+![Home feed with the playlist panel](docs/screenshots/home.png)
+
+The home feed aggregates the newest videos from your channels (or one loadout of them). Drag a
+video onto the playlist on the right, reorder or remove items, then press **Sync**.
+
+![A channel page with the full sidebar](docs/screenshots/channel.png)
+
+Open the sidebar for your full channel list; collapsed, it becomes a rail of channel avatars.
+
 ## Install
 
 1. Download `YT-Curator-<version>.dmg` from the [latest release](https://github.com/Deli5150/yt-curator/releases/latest) and open it.
