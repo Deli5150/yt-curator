@@ -1,0 +1,30 @@
+{
+  "metadata": { "playlistMetadataRenderer": { "title": "Watch Queue", "description": "Things to watch" } },
+  "contents": {
+    "twoColumnBrowseResultsRenderer": {
+      "tabs": [{ "tabRenderer": { "selected": true, "content": { "sectionListRenderer": { "contents": [{ "itemSectionRenderer": { "contents": [{ "playlistVideoListRenderer": { "contents": [
+        {
+          "playlistVideoRenderer": {
+            "videoId": "aaaaaaaaaaa",
+            "setVideoId": "SETA",
+            "title": { "runs": [{ "text": "First video" }] },
+            "shortBylineText": { "runs": [{ "text": "Some Channel", "navigationEndpoint": { "browseEndpoint": { "browseId": "UCaaaaaaaaaaaaaaaaaaaaaa" } } }] },
+            "thumbnail": { "thumbnails": [{ "url": "https://i.ytimg.com/vi/aaaaaaaaaaa/default.jpg", "width": 120 }, { "url": "https://i.ytimg.com/vi/aaaaaaaaaaa/hqdefault.jpg", "width": 480 }] },
+            "lengthText": { "simpleText": "12:34" }
+          }
+        },
+        {
+          "playlistVideoRenderer": {
+            "videoId": "bbbbbbbbbbb",
+            "setVideoId": "SETB",
+            "title": { "simpleText": "Second video" },
+            "thumbnail": { "thumbnails": [{ "url": "//i.ytimg.com/vi/bbbbbbbbbbb/hqdefault.jpg", "width": 480 }] },
+            "thumbnailOverlays": [{ "thumbnailOverlayTimeStatusRenderer": { "text": { "simpleText": "1:02:03" } } }]
+          }
+        },
+        { "continuationItemRenderer": { "continuationEndpoint": { "continuationCommand": { "token": "NEXTPAGE" } } } }
+      ] } }] } }] } } } }]
+    }
+  },
+  "sidebar": { "playlistSidebarRenderer": { "items": [{ "playlistSidebarPrimaryInfoRenderer": { "thumbnailRenderer": { "playlistVideoThumbnailRenderer": { "thumbnail": { "thumbnails": [{ "url": "https://i.ytimg.com/pl.jpg", "width": 336 }] } } } } }] } }
+}
