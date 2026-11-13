@@ -9,8 +9,8 @@ nothing leaves your Mac except requests to YouTube and GitHub (update checks).
 
 ## Install
 
-1. Download `YT-Curator-<version>-mac.zip` from the [latest release](https://github.com/Deli5150/yt-curator/releases/latest) and unzip it.
-2. Move **YT Curator.app** to Applications.
+1. Download `YT-Curator-<version>.dmg` from the [latest release](https://github.com/Deli5150/yt-curator/releases/latest) and open it.
+2. Drag **YT Curator** onto the **Applications** shortcut.
 3. The app is ad-hoc signed, not notarized, so open it the first time with right-click → **Open**
    (or run `xattr -dr com.apple.quarantine "/Applications/YT Curator.app"`).
 
@@ -30,7 +30,7 @@ scripts/bundle.sh --install # release build → build/YT Curator.app, copied to 
 ## Releasing
 
 Add a `## <version>` section to `CHANGELOG.md`, commit, then run `scripts/release.sh <version>`.
-It bumps `VERSION`, builds and zips the app, tags, pushes, and publishes the GitHub release that the
+It bumps `VERSION`, builds the app and its DMG, tags, pushes, and publishes the GitHub release that the
 in-app updater installs from.
 
 ## Layout

@@ -11,8 +11,8 @@ Data API, no OAuth. Sign-in is the real Google page in a WKWebView; its cookies 
 - `scripts/bundle.sh [--install]` → `build/YT Curator.app` (ad-hoc signed), optionally copied to `/Applications`.
 - Swift 5 language mode + `BareSlashRegexLiterals`; macOS 26+ (Liquid Glass APIs).
 - Version lives in `VERSION`. Release: add `## <v>` to CHANGELOG.md, commit, `scripts/release.sh <v>`
-  (public repo Deli5150/yt-curator; asset `YT-Curator-<v>-mac.zip`).
-- `App/Updater.swift`: checks GitHub Releases, verifies the asset's sha256 digest, swaps the .app,
+  (public repo Deli5150/yt-curator; asset `YT-Curator-<v>.dmg`).
+- `App/Updater.swift`: checks GitHub Releases, verifies the DMG's sha256 digest, mounts it, swaps the .app,
   relaunches. End-to-end test without UI: copy the app somewhere, set its CFBundleShortVersionString
   lower, re-sign ad-hoc, run its binary with `YTCURATOR_AUTO_INSTALL_UPDATE=1`.
 

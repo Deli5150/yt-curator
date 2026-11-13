@@ -5,8 +5,9 @@ import Observation
 import SwiftUI
 
 /// In-app updater. New versions are GitHub Releases on the public repo (published by
-/// scripts/release.sh), each carrying `YT-Curator-<version>-mac.zip`. The app is ad-hoc signed,
-/// so it installs updates itself: download, check the SHA-256 GitHub reports, unzip, swap the
+/// scripts/release.sh), each carrying `YT-Curator-<version>.dmg`. The app is ad-hoc signed,
+/// so it installs updates itself: download, check the SHA-256 GitHub reports, mount the DMG, copy
+/// the app out, swap the
 /// running .app for the new one, and relaunch.
 @MainActor
 @Observable
@@ -122,7 +123,7 @@ final class Updater {
               let page = json["html_url"].string.flatMap(URL.init(string:)) else { return nil }
         if json["draft"].bool == true || json["prerelease"].bool == true { return nil }
         let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
-        let assetName = "YT-Curator-\(version)-mac.zip"
+        let assetName = "YT-Curator-\(version).dmg"
         guard let asset = json["assets"].array.first(where: { $0["name"].string == assetName }),
               let url = asset["browser_download_url"].string.flatMap(URL.init(string:)) else { return nil }
         let digest = asset["digest"].string.flatMap { $0.hasPrefix("sha256:") ? String($0.dropFirst(7)) : nil }
@@ -158,9 +159,9 @@ final class Updater {
         }
         state = .downloading(release, progress: 0)
         do {
-            let zip = try await download(release)
+            let dmg = try await download(release)
             state = .installing(release)
-            try await install(zip: zip)
+            try await install(dmg: dmg)
             relaunch()
         } catch {
             state = .failed("Couldn't install the update: \(error.localizedDescription). You can download it from the release page instead.")
@@ -207,13 +208,26 @@ final class Updater {
         return destination
     }
 
-    private func install(zip: URL) async throws {
+    private func install(dmg: URL) async throws {
         let target = Bundle.main.bundleURL
         guard FileManager.default.isWritableFile(atPath: target.deletingLastPathComponent().path) else {
             throw UpdateError("\(target.deletingLastPathComponent().path) can't be changed by your account")
         }
+        // Mount read-only and hidden, copy the app out, detach.
+        let mount = Self.workDir.appending(path: "mount")
         let unpacked = Self.workDir.appending(path: "unpacked")
-        try await Self.run("/usr/bin/ditto", ["-x", "-k", zip.path, unpacked.path])
+        try FileManager.default.createDirectory(at: unpacked, withIntermediateDirectories: true)
+        try await Self.run("/usr/bin/hdiutil", ["attach", dmg.path, "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mount.path])
+        do {
+            guard let name = try FileManager.default.contentsOfDirectory(atPath: mount.path).first(where: { $0.hasSuffix(".app") }) else {
+                throw UpdateError("the update has no app in it")
+            }
+            try await Self.run("/usr/bin/ditto", [mount.appending(path: name).path, unpacked.appending(path: name).path])
+        } catch {
+            try? await Self.run("/usr/bin/hdiutil", ["detach", mount.path, "-force"])
+            throw error
+        }
+        try? await Self.run("/usr/bin/hdiutil", ["detach", mount.path, "-force"])
         guard let name = try FileManager.default.contentsOfDirectory(atPath: unpacked.path).first(where: { $0.hasSuffix(".app") }) else {
             throw UpdateError("the update has no app in it")
         }

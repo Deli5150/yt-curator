@@ -203,13 +203,13 @@ final class UpdaterTests: XCTestCase {
         let json = """
         {"tag_name":"v1.2.0","html_url":"https://github.com/Deli5150/yt-curator/releases/tag/v1.2.0","body":"Notes",
          "draft":false,"prerelease":false,
-         "assets":[{"name":"YT-Curator-1.2.0-mac.zip","browser_download_url":"https://example.com/a.zip","size":123,
+         "assets":[{"name":"YT-Curator-1.2.0.dmg","browser_download_url":"https://example.com/a.zip","size":123,
                     "digest":"sha256:abc123"}]}
         """
         let release = try XCTUnwrap(Updater.parse(Data(json.utf8)))
         XCTAssertEqual(release.version, "1.2.0")
         XCTAssertEqual(release.sha256, "abc123")
         XCTAssertEqual(release.assetSize, 123)
-        XCTAssertNil(Updater.parse(Data(json.replacingOccurrences(of: "-mac.zip", with: ".dmg").utf8)))
+        XCTAssertNil(Updater.parse(Data(json.replacingOccurrences(of: ".dmg", with: "-mac.zip").utf8)))
     }
 }
