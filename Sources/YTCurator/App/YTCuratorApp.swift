@@ -14,6 +14,9 @@ struct YTCuratorApp: App {
         .defaultSize(width: 1100, height: 760)
         .commands {
             SidebarCommands()
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { Task { await app.updater.check(userInitiated: true) } }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("Add Channel…") { app.sheet = .addChannel }
                     .keyboardShortcut("n")
@@ -60,6 +63,16 @@ struct RootView: View {
             }
         }
         .sheet(item: $app.sheet) { SheetHost(sheet: $0) }
+        .sheet(isPresented: Binding(get: { app.updater.presentedRelease != nil },
+                                    set: { if !$0 { app.updater.presentedRelease = nil } })) {
+            if let release = app.updater.presentedRelease { UpdateSheet(release: release) }
+        }
+        .alert("Software Update", isPresented: Binding(get: { app.updater.checkMessage != nil },
+                                                       set: { if !$0 { app.updater.checkMessage = nil } })) {
+            Button("OK") { app.updater.checkMessage = nil }
+        } message: {
+            Text(app.updater.checkMessage ?? "")
+        }
         .alert(
             "Already completed",
             isPresented: Binding(
@@ -195,6 +208,7 @@ struct SettingsView: View {
                     Button("Sign In…") { Task { await app.signIn() } }
                 }
             }
+            UpdateSettingsSection()
             Section("Data") {
                 LabeledContent("Channels", value: "\(app.store.channels.count)")
                 LabeledContent("Loadouts", value: "\(app.store.loadouts.count)")

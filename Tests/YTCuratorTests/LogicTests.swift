@@ -188,3 +188,28 @@ final class CompletedAddTests: XCTestCase {
         XCTAssertFalse(model.completedIds.contains("done"), "re-adding clears the completed mark")
     }
 }
+
+final class UpdaterTests: XCTestCase {
+    func testCompareVersions() {
+        XCTAssertGreaterThan(Updater.compare("1.0.10", "1.0.9"), 0)
+        XCTAssertGreaterThan(Updater.compare("v1.1", "1.0.9"), 0)
+        XCTAssertEqual(Updater.compare("1.0", "1.0.0"), 0)
+        XCTAssertLessThan(Updater.compare("0.9.0", "1.0.0"), 0)
+        XCTAssertEqual(Updater.compare("1.2.0-beta", "1.2.0"), 0)
+    }
+
+    @MainActor
+    func testParseRelease() throws {
+        let json = """
+        {"tag_name":"v1.2.0","html_url":"https://github.com/Deli5150/yt-curator/releases/tag/v1.2.0","body":"Notes",
+         "draft":false,"prerelease":false,
+         "assets":[{"name":"YT-Curator-1.2.0-mac.zip","browser_download_url":"https://example.com/a.zip","size":123,
+                    "digest":"sha256:abc123"}]}
+        """
+        let release = try XCTUnwrap(Updater.parse(Data(json.utf8)))
+        XCTAssertEqual(release.version, "1.2.0")
+        XCTAssertEqual(release.sha256, "abc123")
+        XCTAssertEqual(release.assetSize, 123)
+        XCTAssertNil(Updater.parse(Data(json.replacingOccurrences(of: "-mac.zip", with: ".dmg").utf8)))
+    }
+}

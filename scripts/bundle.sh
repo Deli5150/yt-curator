@@ -4,7 +4,7 @@ set -eu
 cd "$(dirname "$0")/.."
 
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-$(cat VERSION)}"
 APP="build/YT Curator.app"
 
 swift build -c release --product YTCurator

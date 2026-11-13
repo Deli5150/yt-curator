@@ -22,6 +22,7 @@ final class AppModel {
     let playlist: PlaylistModel
     let feed = FeedModel()
     let drag = DragController()
+    let updater = Updater()
 
     var loginState: LoginState = .checking
     var route: Route = .home
@@ -40,6 +41,7 @@ final class AppModel {
     }
 
     func bootstrap() async {
+        updater.start()
         let loggedIn = await YouTubeSession.shared.isLoggedIn()
         loginState = loggedIn ? .signedIn : .signedOut
         if loggedIn { didSignIn() }
