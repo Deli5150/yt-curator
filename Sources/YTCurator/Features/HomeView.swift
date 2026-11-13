@@ -74,7 +74,8 @@ struct HomeView: View {
             Group {
                 if all.isEmpty {
                     if app.feed.isLoading(channels, t) {
-                        ProgressView("Loading \(t == .videos ? "videos" : "live streams")…")
+                        FeedLoadingBar(done: app.feed.batchDone, total: app.feed.batchTotal, noun: t == .videos ? "videos" : "live streams")
+                            .frame(maxWidth: 360)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else if !failed.isEmpty, failed.count == channels.count {
                         ContentUnavailableView {
@@ -93,6 +94,19 @@ struct HomeView: View {
                     }
                 }
             }
+            .overlay(alignment: .top) {
+                // Determinate progress while channels load in over an already-painted feed.
+                if !all.isEmpty, app.feed.isLoading(channels, t), app.feed.batchTotal > 1 {
+                    FeedLoadingBar(done: app.feed.batchDone, total: app.feed.batchTotal, noun: t == .videos ? "videos" : "live streams")
+                        .frame(maxWidth: 360)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .glassEffect(in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .padding(.top, 10)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(.snappy, value: app.feed.isLoading(channels, t))
             .overlay(alignment: .bottom) {
                 if !failed.isEmpty, !all.isEmpty {
                     Button {
@@ -117,15 +131,20 @@ struct HomeView: View {
         }
     }
 
-    private func displayed(_ t: ChannelTab) -> [(video: ChannelVideo, channel: SavedChannel)] {
-        let items = app.feed.items(channels, t)
-        let channelFor = Dictionary(items.map { ($0.video.videoId, $0.channel) }, uniquingKeysWith: { a, _ in a })
-        var videos = VideoSort.apply(VideoSort.newestFirst(items.map(\.video)), sortMode)
+    private func displayed(_ t: ChannelTab) -> [FeedItem] {
+        var items = app.feed.sortedFeed(channels, t)
+        switch sortMode {
+        case .latest: break
+        case .oldest: items.reverse()
+        case .week, .month:
+            let maxAge: TimeInterval = sortMode == .week ? 7 * 86400 : 30 * 86400
+            items.removeAll { ($0.age ?? .infinity) > maxAge }
+        }
         if hideWatched {
             let saved = app.playlist.savedIds, completed = app.playlist.completedIds
-            videos.removeAll { saved.contains($0.videoId) || completed.contains($0.videoId) }
+            items.removeAll { saved.contains($0.id) || completed.contains($0.id) }
         }
-        return videos.compactMap { v in channelFor[v.videoId].map { (v, $0) } }
+        return items
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
@@ -178,7 +197,7 @@ struct ChannelsGrid: View {
                         app.openChannel(channel.channelId)
                     } label: {
                         VStack(spacing: 8) {
-                            RemoteImage(url: channel.avatarUrl)
+                            RemoteImage(url: channel.avatarUrl, maxPixel: 260)
                                 .aspectRatio(1, contentMode: .fit)
                                 .clipShape(Circle())
                             Text(channel.title)
@@ -205,5 +224,28 @@ struct ChannelMenu: View {
         Button("Open on YouTube", systemImage: "arrow.up.right.square") { app.open(YouTubeURL.channel(channel.channelId)) }
         Divider()
         Button("Remove Channel", systemImage: "trash", role: .destructive) { app.removeChannel(channel.channelId) }
+    }
+}
+
+/// "Loading 120 of 249 channels" with a determinate bar.
+struct FeedLoadingBar: View {
+    let done: Int
+    let total: Int
+    let noun: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(total > 0 ? "Loading \(noun)" : "Loading \(noun)…")
+                Spacer()
+                if total > 0 {
+                    Text("\(done) of \(total) channels").monospacedDigit().foregroundStyle(.secondary)
+                }
+            }
+            .font(.caption.weight(.medium))
+            ProgressView(value: Double(done), total: Double(max(total, 1)))
+                .progressViewStyle(.linear)
+                .animation(.easeOut(duration: 0.25), value: done)
+        }
     }
 }

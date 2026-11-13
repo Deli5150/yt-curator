@@ -36,8 +36,46 @@ final class YouTubeSession: NSObject {
         return all.filter { $0.domain.hasSuffix("youtube.com") || $0.domain.hasSuffix("google.com") }
     }
 
+    /// Signed in for InnerTube purposes: auth cookies on youtube.com itself. Google's cookies
+    /// alone aren't enough — they only reach youtube.com after the SetSID redirect.
     private func hasAuthCookies() async -> Bool {
-        await youtubeCookies().contains { Self.authCookieNames.contains($0.name) && !$0.value.isEmpty }
+        await youtubeCookies().contains {
+            $0.domain.hasSuffix("youtube.com") && Self.authCookieNames.contains($0.name) && !$0.value.isEmpty
+        }
+    }
+
+    private func hasGoogleAuthCookies() async -> Bool {
+        await youtubeCookies().contains {
+            $0.domain.hasSuffix("google.com") && Self.authCookieNames.contains($0.name) && !$0.value.isEmpty
+        }
+    }
+
+    private var repairWebView: WKWebView?
+
+    /// With a Google session but no youtube.com cookies (sign-in window closed before the
+    /// redirect back to YouTube), replay the passive sign-in in a hidden web view. A signed-in
+    /// Google account passes straight through SetSID to youtube.com without any UI.
+    private func repairYouTubeCookies() async -> Bool {
+        guard await hasGoogleAuthCookies() else { return false }
+        Diagnostics.write("session: google cookies without youtube.com — replaying passive sign-in")
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = dataStore
+        let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 600), configuration: config)
+        webView.customUserAgent = Self.safariUserAgent
+        repairWebView = webView
+        defer { repairWebView = nil }
+        webView.load(URLRequest(url: Self.loginURL))
+        for _ in 0..<40 {
+            try? await Task.sleep(for: .milliseconds(500))
+            if await hasAuthCookies() {
+                // Let the rest of the youtube.com cookie jar settle.
+                try? await Task.sleep(for: .milliseconds(800))
+                Diagnostics.write("session: youtube.com cookies restored")
+                return true
+            }
+        }
+        Diagnostics.write("session: passive sign-in did not produce youtube.com cookies")
+        return false
     }
 
     /// Cookie header for InnerTube; `.youtube.com` wins over `.google.com` on name collisions.
@@ -55,7 +93,15 @@ final class YouTubeSession: NSObject {
     }
 
     func isLoggedIn() async -> Bool {
-        await hasAuthCookies()
+        if await hasAuthCookies() { return true }
+        return await repairYouTubeCookies()
+    }
+
+    /// Cookie names grouped by domain (never values), for the diagnostics log.
+    func cookieSummary() async -> String {
+        let grouped = Dictionary(grouping: await youtubeCookies(), by: \.domain)
+        return grouped.keys.sorted().map { "\($0): \(grouped[$0]!.map(\.name).sorted().joined(separator: ","))" }
+            .joined(separator: "\n")
     }
 
     func logout() async {
@@ -140,7 +186,7 @@ extension YouTubeSession: NSWindowDelegate {
         Task { @MainActor in
             guard self.loginWindow != nil else { return }
             // Dismissed without completing login — check cookies one last time.
-            let ok = await self.hasAuthCookies()
+            let ok = await self.isLoggedIn()
             self.finish(ok)
         }
     }

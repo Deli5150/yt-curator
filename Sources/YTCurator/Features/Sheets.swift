@@ -354,7 +354,7 @@ struct PlaylistPickerSheet: View {
                         HStack(spacing: 10) {
                             Color.clear
                                 .frame(width: 80, height: 45)
-                                .overlay { RemoteImage(url: item.thumbnailUrl) }
+                                .overlay { RemoteImage(url: item.thumbnailUrl, maxPixel: 180) }
                                 .clipShape(RoundedRectangle(cornerRadius: 8))
                             VStack(alignment: .leading) {
                                 Text(item.title).lineLimit(1)

@@ -38,6 +38,8 @@ struct SidebarView: View {
             .buttonStyle(.borderless)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
+            .background(.bar)
+            .overlay(alignment: .top) { Divider() }
         }
         .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
     }
@@ -74,5 +76,79 @@ struct SidebarView: View {
         .menuStyle(.button)
         .buttonStyle(.plain)
         .help("Switch loadout")
+    }
+}
+
+/// Avatar-only rail shown in place of the collapsed sidebar (Discord-style, like the Glaze rail).
+struct MiniSidebarRail: View {
+    @Environment(AppModel.self) private var app
+
+    static let width: CGFloat = 64
+
+    var body: some View {
+        VStack(spacing: 10) {
+            railButton(systemImage: "house.fill", selected: app.route == .home, help: "Home") { app.route = .home }
+
+            Menu {
+                Picker("Loadout", selection: Binding(
+                    get: { app.store.activeLoadoutId },
+                    set: { app.store.setActiveLoadout($0) }
+                )) {
+                    Text("All channels").tag(String?.none)
+                    ForEach(app.store.loadouts) { Text($0.name).tag(Optional($0.id)) }
+                }
+                .pickerStyle(.inline)
+                Divider()
+                Button("Manage Loadouts…") { app.sheet = .loadouts }
+            } label: {
+                Image(systemName: "square.stack.3d.up")
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(width: 40, height: 40)
+                    .glassEffect(in: Circle())
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .help("Loadout: \(app.store.activeLoadout?.name ?? "All channels")")
+
+            Divider().padding(.horizontal, 14)
+
+            ScrollView(.vertical) {
+                LazyVStack(spacing: 10) {
+                    ForEach(app.store.activeChannels) { channel in
+                        let selected = app.route == .channel(channel.channelId)
+                        Button { app.openChannel(channel.channelId) } label: {
+                            ChannelAvatar(url: channel.avatarUrl, title: channel.title, size: 40)
+                                .padding(3)
+                                .overlay(Circle().strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 2.5))
+                        }
+                        .buttonStyle(.plain)
+                        .help(channel.title)
+                        .contextMenu { ChannelMenu(channel: channel) }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .scrollIndicators(.never)
+
+            railButton(systemImage: "plus", selected: false, help: "Add channel") { app.sheet = .addChannel }
+                .padding(.bottom, 10)
+        }
+        .padding(.top, 8)
+        .frame(width: Self.width)
+        .transition(.move(edge: .leading).combined(with: .opacity))
+    }
+
+    private func railButton(systemImage: String, selected: Bool, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(selected ? Color.white : Color.primary)
+                .frame(width: 40, height: 40)
+                .background(selected ? Color.accentColor : .clear, in: Circle())
+                .glassEffect(in: Circle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 }

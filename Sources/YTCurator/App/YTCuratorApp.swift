@@ -13,6 +13,7 @@ struct YTCuratorApp: App {
         }
         .defaultSize(width: 1100, height: 760)
         .commands {
+            SidebarCommands()
             CommandGroup(replacing: .newItem) {
                 Button("Add Channel…") { app.sheet = .addChannel }
                     .keyboardShortcut("n")
@@ -59,6 +60,21 @@ struct RootView: View {
             }
         }
         .sheet(item: $app.sheet) { SheetHost(sheet: $0) }
+        .alert(
+            "Already completed",
+            isPresented: Binding(
+                get: { app.playlist.pendingCompletedAdd != nil },
+                // Any dismissal without "Yes" (No, Esc) just drops the pending add.
+                set: { if !$0 { app.playlist.pendingCompletedAdd = nil } }
+            ),
+            presenting: app.playlist.pendingCompletedAdd
+        ) { pending in
+            Button("Yes") { app.playlist.confirmAdd(pending) }
+                .keyboardShortcut(.defaultAction)
+            Button("No", role: .cancel) { app.playlist.pendingCompletedAdd = nil }
+        } message: { pending in
+            Text("You already completed “\(pending.video.title)”. Do you still want to add it to the playlist?")
+        }
         .alert("Something went wrong", isPresented: Binding(get: { app.errorMessage != nil }, set: { if !$0 { app.errorMessage = nil } })) {
             Button("OK") { app.errorMessage = nil }
         } message: {
@@ -69,18 +85,29 @@ struct RootView: View {
 
 struct MainView: View {
     @Environment(AppModel.self) private var app
+    /// Starts collapsed to the avatar rail; the full sidebar is a toggle away.
+    @State private var columnVisibility: NavigationSplitViewVisibility = .detailOnly
 
     var body: some View {
         @Bindable var app = app
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView()
         } detail: {
-            Group {
-                switch app.route {
-                case .home: HomeView()
-                case .channel(let id): ChannelView(channelId: id).id(id)
+            HStack(spacing: 0) {
+                // Collapsed sidebar → keep channel avatars reachable in a slim rail.
+                if columnVisibility == .detailOnly {
+                    MiniSidebarRail()
+                    Divider()
                 }
+                Group {
+                    switch app.route {
+                    case .home: HomeView()
+                    case .channel(let id): ChannelView(channelId: id).id(id)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .animation(.snappy, value: columnVisibility)
             .inspector(isPresented: $app.showInspector) {
                 PlaylistInspector()
                     .toolbar {
@@ -93,6 +120,7 @@ struct MainView: View {
                     }
             }
         }
+        .overlay { DragOverlay() }
         .toolbar {
             if !app.showInspector {
                 ToolbarItem(placement: .primaryAction) {

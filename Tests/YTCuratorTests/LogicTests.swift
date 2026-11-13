@@ -158,3 +158,33 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(reopened.channels.map(\.channelId), ["UC2", "UC4"])
     }
 }
+
+@MainActor
+final class CompletedAddTests: XCTestCase {
+    func testCompletedVideoAsksBeforeAdding() throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = AppStore(directory: dir, glazeImport: nil)
+        store.selectedPlaylistId = "PL"
+        let model = PlaylistModel(store: store, state: LocalState(directory: dir))
+        model.edits = StagedEdits(playlistId: "PL", videos: [], removedSetVideoIds: [], addedVideoIds: [], baselineVideoIds: [])
+        model.completedIds = ["done"]
+        func payload(_ id: String) -> VideoDragPayload {
+            VideoDragPayload(videoId: id, title: id, thumbnailUrl: nil, durationText: nil, author: nil)
+        }
+
+        model.requestAdd(payload("fresh"))
+        XCTAssertEqual(model.videos.map(\.videoId), ["fresh"])
+        XCTAssertNil(model.pendingCompletedAdd)
+
+        model.requestAdd(payload("done"), at: 0)
+        XCTAssertEqual(model.videos.map(\.videoId), ["fresh"], "completed video must wait for confirmation")
+        let pending = try XCTUnwrap(model.pendingCompletedAdd)
+
+        // Binding cleared first (as SwiftUI may do), then "Yes" still adds at the dropped position.
+        model.pendingCompletedAdd = nil
+        model.confirmAdd(pending)
+        XCTAssertEqual(model.videos.map(\.videoId), ["done", "fresh"])
+        XCTAssertFalse(model.completedIds.contains("done"), "re-adding clears the completed mark")
+    }
+}

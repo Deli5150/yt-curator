@@ -28,7 +28,12 @@ enum StoreError: LocalizedError {
 @MainActor
 @Observable
 final class AppStore {
-    private(set) var data: AppData
+    private(set) var data: AppData {
+        didSet { refreshActiveChannels() }
+    }
+    /// Channels in the active loadout (all channels when none is active), in saved order.
+    /// Stored because the sidebar, rail and feed all read it on every render.
+    private(set) var activeChannels: [SavedChannel] = []
     @ObservationIgnored private let fileURL: URL
 
     init(directory: URL = AppPaths.supportDir, glazeImport: URL? = AppPaths.glazeAppData) {
@@ -42,6 +47,7 @@ final class AppStore {
         } else {
             data = AppData()
         }
+        refreshActiveChannels()
     }
 
     private static func read(_ url: URL) -> AppData? {
@@ -142,11 +148,15 @@ final class AppStore {
     var activeLoadoutId: String? { data.activeLoadoutId }
     var activeLoadout: Loadout? { data.loadouts.first { $0.id == data.activeLoadoutId } }
 
-    /// Channels in the active loadout (all channels when none is active), in saved order.
-    var activeChannels: [SavedChannel] {
-        guard let loadout = activeLoadout else { return data.channels }
-        let members = Set(loadout.channelIds)
-        return data.channels.filter { members.contains($0.channelId) }
+    private func refreshActiveChannels() {
+        let next: [SavedChannel]
+        if let loadout = activeLoadout {
+            let members = Set(loadout.channelIds)
+            next = data.channels.filter { members.contains($0.channelId) }
+        } else {
+            next = data.channels
+        }
+        if next != activeChannels { activeChannels = next }
     }
 
     @discardableResult

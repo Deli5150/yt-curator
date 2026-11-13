@@ -63,16 +63,33 @@ enum Parsers {
         var continuation: String?
     }
 
-    /// Walk `root` in document order collecting list items and the last continuation token.
+    /// Walk `root` in document order collecting list items and the list's continuation token.
+    /// A page can hold several continuations (e.g. a playlist plus a suggestions section below
+    /// it); the one that sits in the same array as the items wins.
     static func collectItems(_ root: J) -> ItemList {
         var out = ItemList()
-        walkItems(root, &out)
+        var primary: String?
+        var fallback: String?
+        walkItems(root, &out, &primary, &fallback)
+        out.continuation = primary ?? fallback
         return out
     }
 
-    private static func walkItems(_ node: J, _ out: inout ItemList) {
+    private static func walkItems(_ node: J, _ out: inout ItemList, _ primary: inout String?, _ fallback: inout String?) {
         if let a = node.raw as? [Any] {
-            for v in a { walkItems(J(v), &out) }
+            let itemsBefore = out.items.count
+            var arrayToken: String?
+            for v in a {
+                let element = J(v)
+                if element["continuationItemRenderer"].exists {
+                    arrayToken = continuationToken(element["continuationItemRenderer"]) ?? arrayToken
+                } else {
+                    walkItems(element, &out, &primary, &fallback)
+                }
+            }
+            if let arrayToken {
+                if out.items.count > itemsBefore, primary == nil { primary = arrayToken } else { fallback = arrayToken }
+            }
             return
         }
         guard let d = node.dict else { return }
@@ -81,9 +98,9 @@ enum Parsers {
             if itemKeys.contains(key) {
                 out.items.append((key, v))
             } else if key == "continuationItemRenderer" {
-                if let token = continuationToken(v) { out.continuation = token }
+                if let token = continuationToken(v) { fallback = token }
             } else {
-                walkItems(v, &out)
+                walkItems(v, &out, &primary, &fallback)
             }
         }
     }

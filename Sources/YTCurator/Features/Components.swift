@@ -3,43 +3,65 @@ import SwiftUI
 
 // MARK: - Remote images
 
-/// Memory + URLCache-backed image loader so thumbnails and avatars don't re-download on scroll.
+/// Memory + URLCache-backed image loader. Images are decoded and downsampled off the main
+/// thread to the pixel size they're drawn at — decoding full 1280×720 thumbnails lazily during
+/// drawing is what made scrolling stutter.
 actor ImageLoader {
     static let shared = ImageLoader()
 
-    private nonisolated(unsafe) let memory = NSCache<NSURL, NSImage>()
-    private var inflight: [URL: Task<NSImage?, Never>] = [:]
+    private nonisolated(unsafe) let memory = NSCache<NSString, NSImage>()
+    private var inflight: [String: Task<NSImage?, Never>] = [:]
     private let session: URLSession = {
         let config = URLSessionConfiguration.default
-        config.urlCache = URLCache(memoryCapacity: 64 << 20, diskCapacity: 512 << 20,
+        config.urlCache = URLCache(memoryCapacity: 32 << 20, diskCapacity: 512 << 20,
                                    directory: AppPaths.cacheDir.appending(path: "images"))
         config.requestCachePolicy = .returnCacheDataElseLoad
         config.httpMaximumConnectionsPerHost = 6
         return URLSession(configuration: config)
     }()
 
-    init() { memory.countLimit = 600 }
+    init() { memory.totalCostLimit = 256 << 20 }
 
-    nonisolated func cached(_ url: URL) -> NSImage? { memory.object(forKey: url as NSURL) }
+    private nonisolated static func key(_ url: URL, _ maxPixel: Int) -> NSString { "\(maxPixel)#\(url.absoluteString)" as NSString }
 
-    func image(_ url: URL) async -> NSImage? {
-        if let hit = memory.object(forKey: url as NSURL) { return hit }
-        if let task = inflight[url] { return await task.value }
-        let task = Task<NSImage?, Never> {
+    nonisolated func cached(_ url: URL, maxPixel: Int) -> NSImage? { memory.object(forKey: Self.key(url, maxPixel)) }
+
+    func image(_ url: URL, maxPixel: Int) async -> NSImage? {
+        let key = Self.key(url, maxPixel) as String
+        if let hit = memory.object(forKey: key as NSString) { return hit }
+        if let task = inflight[key] { return await task.value }
+        let session = session
+        let task = Task.detached(priority: .utility) { () -> NSImage? in
             guard let (data, _) = try? await session.data(from: url) else { return nil }
-            return NSImage(data: data)
+            return Self.downsample(data, maxPixel: maxPixel)
         }
-        inflight[url] = task
+        inflight[key] = task
         let image = await task.value
-        inflight[url] = nil
-        if let image { memory.setObject(image, forKey: url as NSURL) }
+        inflight[key] = nil
+        if let image, let rep = image.representations.first {
+            memory.setObject(image, forKey: key as NSString, cost: rep.pixelsWide * rep.pixelsHigh * 4)
+        }
         return image
+    }
+
+    /// Decode straight to a bitmap no larger than `maxPixel` on its longest side.
+    nonisolated static func downsample(_ data: Data, maxPixel: Int) -> NSImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceShouldCacheImmediately: true,
+                  kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+              ] as CFDictionary) else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
     }
 }
 
 struct RemoteImage<Placeholder: View>: View {
     let url: String?
     var contentMode: ContentMode = .fill
+    /// Longest side in pixels to decode at; match it to the drawn size (×2 for Retina).
+    var maxPixel: Int = 640
     @ViewBuilder var placeholder: () -> Placeholder
 
     @State private var image: NSImage?
@@ -54,16 +76,17 @@ struct RemoteImage<Placeholder: View>: View {
         }
         .task(id: url) {
             guard let url, let u = URL(string: url) else { image = nil; return }
-            if let hit = ImageLoader.shared.cached(u) { image = hit; return }
+            if let hit = ImageLoader.shared.cached(u, maxPixel: maxPixel) { image = hit; return }
             image = nil
-            image = await ImageLoader.shared.image(u)
+            let loaded = await ImageLoader.shared.image(u, maxPixel: maxPixel)
+            if !Task.isCancelled { image = loaded }
         }
     }
 }
 
 extension RemoteImage where Placeholder == Color {
-    init(url: String?, contentMode: ContentMode = .fill) {
-        self.init(url: url, contentMode: contentMode) { Color.secondary.opacity(0.15) }
+    init(url: String?, contentMode: ContentMode = .fill, maxPixel: Int = 640) {
+        self.init(url: url, contentMode: contentMode, maxPixel: maxPixel) { Color.secondary.opacity(0.15) }
     }
 }
 
@@ -73,7 +96,7 @@ struct ChannelAvatar: View {
     var size: CGFloat = 28
 
     var body: some View {
-        RemoteImage(url: url) {
+        RemoteImage(url: url, maxPixel: Int(size * 2)) {
             ZStack {
                 Circle().fill(Color.accentColor.opacity(0.25))
                 Text(String(title.prefix(1)).uppercased())
@@ -126,8 +149,10 @@ struct VideoTile: View {
     var showChannel = false
 
     @State private var hovering = false
+    @State private var thumbFrame = FrameBox()
 
     private var playlist: PlaylistModel { app.playlist }
+    private var isDragging: Bool { app.drag.activeVideoId == video.videoId }
     private var isSaved: Bool { playlist.savedIds.contains(video.videoId) }
     private var isCompleted: Bool { playlist.completedIds.contains(video.videoId) }
 
@@ -161,11 +186,21 @@ struct VideoTile: View {
         }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .draggable(video.dragPayload(author: channel?.title).encoded) {
-            RemoteImage(url: video.thumbnailUrl)
-                .frame(width: 160, height: 90)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-        }
+        // The grabbed thumbnail is drawn by DragOverlay; the tile stays behind as a ghost.
+        .opacity(isDragging ? 0.35 : 1)
+        .scaleEffect(isDragging ? 0.97 : 1)
+        .animation(.snappy(duration: 0.2), value: isDragging)
+        .gesture(
+            DragGesture(minimumDistance: 4, coordinateSpace: .global)
+                .onChanged { value in
+                    // Starts the drag; DragController tracks the mouse from here on.
+                    if app.drag.payload == nil {
+                        app.drag.begin(video.dragPayload(author: channel?.title), sourceFrame: thumbFrame.frame,
+                                       start: value.startLocation, playlist: playlist)
+                        app.drag.move(to: value.location, playlist: playlist)
+                    }
+                }
+        )
         .onTapGesture(count: 2) { app.open(YouTubeURL.video(video.videoId)) }
         .contextMenu { menu }
     }
@@ -175,6 +210,7 @@ struct VideoTile: View {
             .aspectRatio(16 / 9, contentMode: .fit)
             .overlay { RemoteImage(url: video.thumbnailUrl) }
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { thumbFrame.frame = $0 }
             .overlay(alignment: .bottomTrailing) {
                 if let d = video.durationText { ThumbBadge(text: d).padding(6) }
             }
@@ -186,7 +222,7 @@ struct VideoTile: View {
                 // Hover "+" (suppressed while saved; a completed-but-unsaved tile can be re-added).
                 if hovering, !isSaved, playlist.hasPlaylist {
                     Button {
-                        playlist.add(video.dragPayload(author: channel?.title))
+                        playlist.requestAdd(video.dragPayload(author: channel?.title))
                     } label: {
                         Image(systemName: "plus").font(.body.weight(.bold)).frame(width: 28, height: 28)
                     }
@@ -220,7 +256,7 @@ struct VideoTile: View {
             Button("Remove from Playlist", systemImage: "minus.circle") { playlist.remove(videoId: video.videoId) }
                 .disabled(!playlist.hasPlaylist)
         } else {
-            Button("Add to Playlist", systemImage: "plus.circle") { playlist.add(video.dragPayload(author: channel?.title)) }
+            Button("Add to Playlist", systemImage: "plus.circle") { playlist.requestAdd(video.dragPayload(author: channel?.title)) }
                 .disabled(!playlist.hasPlaylist)
         }
         Divider()

@@ -13,7 +13,10 @@ Data API, no OAuth. Sign-in is the real Google page in a WKWebView; its cookies 
 
 ## Layout
 - `YouTube/InnerTube.swift` — transport, WEB client context (version scraped from youtube.com, fallback
-  constant), `RequestGate` (2 concurrent, 300ms spacing, 30s cooldown after 429 — don't loosen it).
+  constant), adaptive `RequestGate`: fast pace (6 concurrent, 80ms) until the first 429, then a 30s
+  cooldown and the Glaze-era safe pace (2 concurrent, 300ms) for 10 minutes. Priority lane for
+  user-initiated requests. Measured 2026-11-12: 249-channel cold feed 176.6s → 30.3s, no 429s.
+  Home feed fetches 1 page per channel (FeedModel.maxPages).
 - `YouTube/YouTubeClient.swift` — every endpoint + the sync algorithm. `YouTube/Parsers.swift` — the
   only code that knows response shapes. If YouTube changes shapes, only these two files should change.
 - `Store/` — `AppStore` (app-data.json, same JSON shape as Glaze; imported from Glaze on first launch),

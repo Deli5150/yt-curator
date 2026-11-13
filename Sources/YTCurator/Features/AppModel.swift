@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import SwiftUI
 
 enum LoginState { case checking, signedOut, signedIn }
 
@@ -20,6 +21,7 @@ final class AppModel {
     let store = AppStore()
     let playlist: PlaylistModel
     let feed = FeedModel()
+    let drag = DragController()
 
     var loginState: LoginState = .checking
     var route: Route = .home
@@ -45,7 +47,11 @@ final class AppModel {
 
     private func didSignIn() {
         Task { await playlist.load() }
-        // Cosmetic avatar refresh, deferred so it doesn't compete with the feed's boot burst.
+        // Cosmetic avatar refresh: one heavy channel-page request per saved channel, so at most
+        // once a day, and deferred so it doesn't compete with the feed's boot burst.
+        let key = "lastAvatarRefresh"
+        let last = UserDefaults.standard.object(forKey: key) as? Date ?? .distantPast
+        guard Date().timeIntervalSince(last) > 24 * 3600 else { return }
         avatarRefreshTask?.cancel()
         avatarRefreshTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(4))
@@ -53,6 +59,7 @@ final class AppModel {
             let refreshed = await YouTubeClient.shared.refreshSavedChannels(self.store.channels)
             guard !Task.isCancelled else { return }
             self.store.replaceChannels(refreshed)
+            UserDefaults.standard.set(Date(), forKey: key)
         }
     }
 
@@ -117,26 +124,43 @@ final class AppModel {
 @Observable
 final class PlaylistModel {
     @ObservationIgnored private let store: AppStore
-    @ObservationIgnored private let state = LocalState()
+    @ObservationIgnored private let state: LocalState
 
     var playlists: [PlaylistSummary] = []
     var playlistsLoading = false
     var playlistsError: String?
 
     var detail: PlaylistDetail?
-    var edits: StagedEdits?
+    var edits: StagedEdits? {
+        didSet {
+            // Stored (not computed) and only reassigned on real change: every video tile reads
+            // these, so recomputing or re-publishing them on a reorder re-rendered the whole grid.
+            let saved = Set(edits?.videos.map(\.videoId) ?? [])
+            if saved != savedIds { savedIds = saved }
+            let pending = Staging.pendingChanges(edits)
+            if pending != pendingChanges { pendingChanges = pending }
+        }
+    }
+    private(set) var savedIds: Set<String> = []
+    private(set) var pendingChanges = 0
     var completedIds: Set<String> = []
+    /// Row the playlist list should scroll to (set after a quick-drop zone add).
+    var scrollTarget: ScrollRequest?
+    struct ScrollRequest: Equatable { var key: String; var atTop: Bool }
     var loading = false
     var syncing = false
     var error: String?
 
-    init(store: AppStore) { self.store = store }
+    init(store: AppStore, state: LocalState = LocalState()) {
+        self.store = store
+        self.state = state
+        playlistId = store.selectedPlaylistId
+    }
 
-    var playlistId: String? { store.selectedPlaylistId }
+    /// Mirrors the store's selection so tiles don't observe the whole app-data object.
+    private(set) var playlistId: String?
     var hasPlaylist: Bool { playlistId != nil }
     var videos: [PlaylistVideo] { edits?.videos ?? [] }
-    var savedIds: Set<String> { Set(videos.map(\.videoId)) }
-    var pendingChanges: Int { Staging.pendingChanges(edits) }
 
     func reset() {
         playlists = []
@@ -160,6 +184,7 @@ final class PlaylistModel {
     func select(_ id: String) async {
         guard id != playlistId else { return }
         store.selectedPlaylistId = id
+        playlistId = id
         detail = nil
         edits = nil
         completedIds = Completed.load(id, in: state)
@@ -191,7 +216,8 @@ final class PlaylistModel {
         let merged = Staging.merge(fresh, existing: Staging.load(fresh.id, in: state))
         setEdits(merged)
         let members = fresh.videos.filter { $0.setVideoId != nil }.map(\.videoId)
-        completedIds = Completed.reconcileExternalRemovals(fresh.id, current: members, in: state)
+        let completed = Completed.reconcileExternalRemovals(fresh.id, current: members, in: state)
+        if completed != completedIds { completedIds = completed }
     }
 
     private func setEdits(_ next: StagedEdits) {
@@ -210,6 +236,36 @@ final class PlaylistModel {
     }
 
     // MARK: - Staged edits
+
+    /// An add of an already-completed video, waiting for the user's yes/no.
+    struct PendingAdd: Identifiable {
+        let id = UUID()
+        var video: VideoDragPayload
+        var index: Int?
+        var scroll: ScrollRequest?
+    }
+    var pendingCompletedAdd: PendingAdd?
+
+    /// Every UI add goes through here: adds right away, or asks first when the video was
+    /// already completed (the answer comes back through `resolvePendingAdd`).
+    func requestAdd(_ video: VideoDragPayload, at index: Int? = nil, scroll: ScrollRequest? = nil) {
+        guard edits != nil, !savedIds.contains(video.videoId) else { return }
+        if completedIds.contains(video.videoId) {
+            pendingCompletedAdd = PendingAdd(video: video, index: index, scroll: scroll)
+            return
+        }
+        add(video, at: index)
+        if let scroll { scrollTarget = scroll }
+    }
+
+    /// "Yes" on the completed-video prompt. Takes the presented item itself, so it works no
+    /// matter whether SwiftUI clears the alert binding before or after running the button.
+    func confirmAdd(_ pending: PendingAdd) {
+        pendingCompletedAdd = nil
+        guard !savedIds.contains(pending.video.videoId) else { return }
+        withAnimation(.snappy(duration: 0.25)) { add(pending.video, at: pending.index) }
+        if let scroll = pending.scroll { scrollTarget = scroll }
+    }
 
     func add(_ video: VideoDragPayload, at index: Int? = nil) {
         guard let edits else { return }
@@ -271,30 +327,61 @@ final class PlaylistModel {
 
 // MARK: - Home feed loader (port of home-feed.tsx's per-channel queries)
 
+/// One aggregated feed entry with its publish age parsed once (the regex is too slow to rerun
+/// inside sort comparators on every render).
+struct FeedItem: Identifiable {
+    var video: ChannelVideo
+    var channel: SavedChannel
+    var age: TimeInterval?
+    var id: String { video.videoId }
+}
+
 @MainActor
 @Observable
 final class FeedModel {
-    /// Shallow page budget per channel so aggregating many channels stays a handful of requests.
-    static let maxPages = 2
+    /// One page (the 30 newest, since the client forces the "Latest" sort) per channel: the
+    /// aggregated feed only needs recent uploads, and a second page doubled the request count.
+    static let maxPages = 1
     /// Like React Query's staleTime: refetch in the background when older than this.
     static let staleAfter: TimeInterval = 5 * 60
+    /// Fetch completions are applied in batches so the grid re-renders a few times a second
+    /// instead of once per channel.
+    static let flushInterval: Duration = .milliseconds(250)
 
-    struct Key: Hashable { var channelId: String; var tab: ChannelTab }
+    struct Key: Hashable, Sendable { var channelId: String; var tab: ChannelTab }
 
     private(set) var pages: [Key: ChannelVideosPage] = [:]
     private(set) var failures: [Key: String] = [:]
     private(set) var inFlight: Set<Key> = []
+    /// Progress of the current fetch run (reset when a run starts from idle), for the loading bar.
+    private(set) var batchTotal = 0
+    private(set) var batchDone = 0
+    @ObservationIgnored private var batchStarted = Date()
+    /// Bumped on every applied batch; derived feeds are memoized against it.
+    private(set) var version = 0
+
     @ObservationIgnored private var fetchedAt: [Key: Date] = [:]
+    @ObservationIgnored private var diskChecked: Set<Key> = []
+    @ObservationIgnored private var pendingPages: [Key: ChannelVideosPage] = [:]
+    @ObservationIgnored private var pendingFailures: [Key: String] = [:]
+    @ObservationIgnored private var pendingDone: Set<Key> = []
+    @ObservationIgnored private var flushScheduled = false
+    @ObservationIgnored private var memo: (key: MemoKey, items: [FeedItem])?
+
+    private struct MemoKey: Equatable { var tab: ChannelTab; var channels: [SavedChannel]; var version: Int }
 
     func reset() {
         pages = [:]
         failures = [:]
         inFlight = []
         fetchedAt = [:]
+        diskChecked = []
+        memo = nil
+        version += 1
     }
 
     func isLoading(_ channels: [SavedChannel], _ tab: ChannelTab) -> Bool {
-        channels.contains { inFlight.contains(Key(channelId: $0.channelId, tab: tab)) }
+        !inFlight.isEmpty && channels.contains { inFlight.contains(Key(channelId: $0.channelId, tab: tab)) }
     }
 
     func loadedCount(_ channels: [SavedChannel], _ tab: ChannelTab) -> Int {
@@ -302,52 +389,116 @@ final class FeedModel {
     }
 
     func failed(_ channels: [SavedChannel], _ tab: ChannelTab) -> [Key] {
-        channels.map { Key(channelId: $0.channelId, tab: tab) }.filter { failures[$0] != nil }
+        guard !failures.isEmpty else { return [] }
+        return channels.map { Key(channelId: $0.channelId, tab: tab) }.filter { failures[$0] != nil }
     }
 
-    /// Aggregate videos for the given channels, each tagged with its channel.
-    func items(_ channels: [SavedChannel], _ tab: ChannelTab) -> [(video: ChannelVideo, channel: SavedChannel)] {
+    /// Aggregated, de-duplicated, newest-first feed for the given channels (memoized).
+    func sortedFeed(_ channels: [SavedChannel], _ tab: ChannelTab) -> [FeedItem] {
+        let key = MemoKey(tab: tab, channels: channels, version: version)
+        if let memo, memo.key == key { return memo.items }
         var seen = Set<String>()
-        var out: [(ChannelVideo, SavedChannel)] = []
+        var items: [FeedItem] = []
         for channel in channels {
             for video in pages[Key(channelId: channel.channelId, tab: tab)]?.videos ?? [] where seen.insert(video.videoId).inserted {
-                out.append((video, channel))
+                items.append(FeedItem(video: video, channel: channel, age: VideoSort.relativeAge(video.publishedText)))
             }
         }
-        return out
+        // Stable newest-first; unparseable dates sink to the bottom.
+        let sorted = items.enumerated().sorted { a, b in
+            switch (a.element.age, b.element.age) {
+            case let (x?, y?): x == y ? a.offset < b.offset : x < y
+            case (nil, nil): a.offset < b.offset
+            case (nil, _): false
+            case (_, nil): true
+            }
+        }.map(\.element)
+        memo = (key, sorted)
+        return sorted
     }
 
     func load(_ channels: [SavedChannel], _ tab: ChannelTab, force: Bool = false) {
-        for channel in channels {
-            let key = Key(channelId: channel.channelId, tab: tab)
-            if pages[key] == nil, let cached = FeedCache.read(channel.channelId, tab) {
-                // Warm start: paint the last-fetched page instantly, refresh in the background.
-                pages[key] = cached.page
-                fetchedAt[key] = cached.savedAt
+        let keys = channels.map { Key(channelId: $0.channelId, tab: tab) }
+        let unchecked = keys.filter { pages[$0] == nil && !diskChecked.contains($0) }
+        diskChecked.formUnion(unchecked)
+        guard !unchecked.isEmpty else {
+            startFetches(keys, force: force)
+            return
+        }
+        // Warm start: read last-fetched pages off the main thread, paint them, then refresh.
+        Task {
+            let cached = await Task.detached(priority: .userInitiated) {
+                unchecked.compactMap { key in FeedCache.read(key.channelId, key.tab).map { (key, $0) } }
+            }.value
+            for (key, entry) in cached where pages[key] == nil {
+                pages[key] = entry.page
+                fetchedAt[key] = entry.savedAt
             }
-            if inFlight.contains(key) { continue }
-            if !force, failures[key] == nil, let at = fetchedAt[key], Date().timeIntervalSince(at) < Self.staleAfter { continue }
-            fetch(key, force: force)
+            if !cached.isEmpty { version += 1 }
+            startFetches(keys, force: force)
         }
     }
 
     func retry(_ keys: [Key]) {
-        for key in keys where !inFlight.contains(key) { fetch(key, force: true) }
+        startFetches(keys, force: true)
     }
 
-    private func fetch(_ key: Key, force: Bool) {
-        inFlight.insert(key)
-        Task {
-            defer { inFlight.remove(key) }
-            do {
-                let page = try await YouTubeClient.shared.getChannelVideos(key.channelId, tab: key.tab, maxPages: Self.maxPages, force: force)
-                pages[key] = page
-                failures[key] = nil
-                fetchedAt[key] = Date()
-                FeedCache.write(key.channelId, key.tab, page)
-            } catch {
-                failures[key] = error.localizedDescription
+    private func startFetches(_ keys: [Key], force: Bool) {
+        let due = keys.filter { key in
+            if inFlight.contains(key) { return false }
+            if force || failures[key] != nil { return true }
+            guard let at = fetchedAt[key] else { return true }
+            return Date().timeIntervalSince(at) >= Self.staleAfter
+        }
+        guard !due.isEmpty else { return }
+        if inFlight.isEmpty {
+            batchTotal = 0
+            batchDone = 0
+            batchStarted = Date()
+        }
+        batchTotal += due.count
+        inFlight.formUnion(due)
+        for key in due {
+            Task {
+                do {
+                    let page = try await YouTubeClient.shared.getChannelVideos(key.channelId, tab: key.tab, maxPages: Self.maxPages, force: force)
+                    pendingPages[key] = page
+                    fetchedAt[key] = Date()
+                    Task.detached(priority: .background) { FeedCache.write(key.channelId, key.tab, page) }
+                } catch {
+                    pendingFailures[key] = error.localizedDescription
+                }
+                pendingDone.insert(key)
+                scheduleFlush()
             }
+        }
+    }
+
+    private func scheduleFlush() {
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        Task {
+            try? await Task.sleep(for: Self.flushInterval)
+            // Don't reflow the grid under a drag in progress.
+            while DragController.isDragging { try? await Task.sleep(for: Self.flushInterval) }
+            flushScheduled = false
+            var nextPages = pages, nextFailures = failures
+            for (key, page) in pendingPages {
+                nextPages[key] = page
+                nextFailures[key] = nil
+            }
+            for (key, message) in pendingFailures { nextFailures[key] = message }
+            pages = nextPages
+            if nextFailures != failures { failures = nextFailures }
+            inFlight.subtract(pendingDone)
+            batchDone += pendingDone.count
+            if inFlight.isEmpty, batchTotal > 0 {
+                Diagnostics.write(String(format: "feed: %d channel fetches in %.1fs", batchTotal, Date().timeIntervalSince(batchStarted)))
+            }
+            pendingPages = [:]
+            pendingFailures = [:]
+            pendingDone = []
+            version += 1
         }
     }
 }

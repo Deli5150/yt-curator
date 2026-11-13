@@ -58,7 +58,7 @@ struct ChannelView: View {
     }
 
     private func loadDetail() async {
-        detail = try? await YouTubeClient.shared.getChannel(channelId)
+        detail = try? await YouTubeClient.shared.getChannel(channelId, priority: true)
     }
 
     private func load(force: Bool = false) async {
@@ -67,7 +67,7 @@ struct ChannelView: View {
         error = nil
         defer { loading = false }
         do {
-            let result = try await YouTubeClient.shared.getChannelVideos(channelId, tab: tab, maxPages: pageBudget, force: force)
+            let result = try await YouTubeClient.shared.getChannelVideos(channelId, tab: tab, maxPages: pageBudget, force: force, priority: true)
             // Never show a stale previous channel's/tab's videos.
             guard requested == (channelId, tab, pageBudget) else { return }
             page = result
@@ -119,7 +119,7 @@ struct ChannelView: View {
             Color.clear
                 .frame(height: 160)
                 .overlay {
-                    RemoteImage(url: detail?.bannerUrl) {
+                    RemoteImage(url: detail?.bannerUrl, maxPixel: 2400) {
                         LinearGradient(colors: [.red.opacity(0.35), .accentColor.opacity(0.25)], startPoint: .topLeading, endPoint: .bottomTrailing)
                     }
                 }

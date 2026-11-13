@@ -1,10 +1,8 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// Right-hand playlist panel: staged reorder/remove/add, then Sync (port of playlist-panel.tsx).
 struct PlaylistInspector: View {
     @Environment(AppModel.self) private var app
-    @State private var dropTargeted = false
 
     private var playlist: PlaylistModel { app.playlist }
 
@@ -14,6 +12,16 @@ struct PlaylistInspector: View {
                 header
                 Divider()
                 list
+                // While a video is dragged, quick-drop zones open under the list.
+                if app.drag.payload != nil, playlist.edits != nil {
+                    PlaylistDropZones()
+                        .padding(.horizontal, 12)
+                        .padding(.top, 10)
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .scale(scale: 0.9, anchor: .bottom)),
+                            removal: .opacity
+                        ))
+                }
                 footer
             } else {
                 ContentUnavailableView {
@@ -25,16 +33,9 @@ struct PlaylistInspector: View {
                 }
             }
         }
-        .overlay {
-            if dropTargeted {
-                RoundedRectangle(cornerRadius: 16).stroke(Color.accentColor, lineWidth: 3).padding(4).allowsHitTesting(false)
-            }
-        }
-        .dropDestination(for: String.self) { strings, _ in
-            let payloads = strings.compactMap(VideoDragPayload.decode)
-            payloads.forEach { playlist.add($0) }
-            return !payloads.isEmpty
-        } isTargeted: { dropTargeted = $0 }
+        // Drop target for tiles dragged via DragController (drawn by DragOverlay).
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { app.drag.playlistFrame = $0 }
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: app.drag.payload != nil)
         .inspectorColumnWidth(min: 300, ideal: 340, max: 480)
     }
 
@@ -107,25 +108,23 @@ struct PlaylistInspector: View {
                                    description: Text("Drag videos here or use the + on a tile."))
                 .frame(maxHeight: .infinity)
         } else {
-            List {
-                ForEach(Array(playlist.videos.enumerated()), id: \.element.key) { index, video in
-                    PlaylistRow(video: video, index: index, count: playlist.videos.count)
+            ScrollViewReader { proxy in
+                List {
+                    ForEach(Array(playlist.videos.enumerated()), id: \.element.key) { index, video in
+                        PlaylistRow(video: video, index: index, count: playlist.videos.count)
+                    }
+                    .onMove { playlist.move(from: $0, to: $1) }
                 }
-                .onMove { playlist.move(from: $0, to: $1) }
-                .onInsert(of: [.plainText, .utf8PlainText]) { index, providers in
-                    insert(providers, at: index)
+                .listStyle(.inset)
+                .scrollContentBackground(.hidden)
+                .onChange(of: playlist.scrollTarget) { _, request in
+                    guard let request else { return }
+                    playlist.scrollTarget = nil
+                    // Wait for the inserted row to be laid out, or the scroll stops one row short.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                        withAnimation(.snappy) { proxy.scrollTo(request.key, anchor: request.atTop ? .top : .bottom) }
+                    }
                 }
-            }
-            .listStyle(.inset)
-            .scrollContentBackground(.hidden)
-        }
-    }
-
-    private func insert(_ providers: [NSItemProvider], at index: Int) {
-        for provider in providers {
-            _ = provider.loadObject(ofClass: NSString.self) { object, _ in
-                guard let string = object as? String, let payload = VideoDragPayload.decode(string) else { return }
-                Task { @MainActor in playlist.add(payload, at: index) }
             }
         }
     }
@@ -171,7 +170,7 @@ struct PlaylistRow: View {
         HStack(spacing: 10) {
             Color.clear
                 .frame(width: 96, height: 54)
-                .overlay { RemoteImage(url: video.thumbnailUrl) }
+                .overlay { RemoteImage(url: video.thumbnailUrl, maxPixel: 200) }
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .overlay(alignment: .bottomTrailing) {
                     if let d = video.durationText { ThumbBadge(text: d).scaleEffect(0.85).padding(2) }
@@ -203,6 +202,9 @@ struct PlaylistRow: View {
         .onHover { hovering = $0 }
         .onTapGesture(count: 2) { app.open(YouTubeURL.video(video.videoId)) }
         .contextMenu { menu }
+        // Row frames let a dragged tile find its insertion point.
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { app.drag.rowFrames[video.key] = $0 }
+        .onDisappear { app.drag.rowFrames[video.key] = nil }
     }
 
     private var actions: some View {

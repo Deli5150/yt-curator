@@ -54,7 +54,7 @@ actor YouTubeClient {
 
         for browseId in ["FEplaylist_aggregation", "FElibrary"] where items.isEmpty {
             do {
-                var page = Parsers.collectItems(try await innerTube.call("browse", ["browseId": browseId])["contents"])
+                var page = Parsers.collectItems(try await innerTube.call("browse", ["browseId": browseId], priority: true)["contents"])
                 items = page.items
                 var pages = 1
                 while let token = page.continuation, pages < 10 {
@@ -83,7 +83,7 @@ actor YouTubeClient {
     func getPlaylist(_ playlistId: String) async throws -> PlaylistDetail {
         let response: J
         do {
-            response = try await innerTube.call("browse", ["browseId": "VL" + playlistId], label: "getPlaylist(\(playlistId))")
+            response = try await innerTube.call("browse", ["browseId": "VL" + playlistId], label: "getPlaylist(\(playlistId))", priority: true)
         } catch {
             throw YouTubeError.other("Failed to load playlist: \(Self.describePlaylistError(error))")
         }
@@ -93,7 +93,13 @@ actor YouTubeClient {
         var pages = 0
         while let token = page.continuation, pages < 20 {
             // Gate continuations too — an ungated pagination loop is what floods YouTube into a 429.
-            guard let next = try? await innerTube.call("browse", ["continuation": token]) else { break }
+            let next: J
+            do {
+                next = try await innerTube.call("browse", ["continuation": token], priority: true)
+            } catch {
+                Diagnostics.write("getPlaylist continuation failed: \(error.localizedDescription)")
+                break
+            }
             page = Parsers.continuationItems(next)
             rawItems += page.items
             pages += 1
@@ -122,12 +128,13 @@ actor YouTubeClient {
 
     // MARK: - Channels
 
-    func getChannel(_ channelId: String) async throws -> ChannelDetail {
+    /// `priority` = user-initiated (jumps ahead of background feed/avatar requests in the gate).
+    func getChannel(_ channelId: String, priority: Bool = false) async throws -> ChannelDetail {
         if let cached = cacheGet(channelDetailCache, channelId) { return cached }
         if let inflight = channelInflight[channelId] { return try await inflight.value }
         let task = Task<ChannelDetail, Error> {
             do {
-                let response = try await innerTube.call("browse", ["browseId": channelId], label: "getChannel(\(channelId))")
+                let response = try await innerTube.call("browse", ["browseId": channelId], label: "getChannel(\(channelId))", priority: priority)
                 return Parsers.channelDetail(channelId: channelId, response: response)
             } catch {
                 throw YouTubeError.other("Failed to load channel: \(error.localizedDescription)")
@@ -143,7 +150,7 @@ actor YouTubeClient {
     func resolveChannelById(_ rawId: String) async throws -> SavedChannel {
         let id = rawId.trimmingCharacters(in: .whitespaces)
         guard !id.isEmpty else { throw YouTubeError.other("Channel id is required.") }
-        let detail = try await getChannel(id)
+        let detail = try await getChannel(id, priority: true)
         // Fall back to the id so handle-based dedupe can't collapse two handle-less channels.
         let handle = detail.handle.map { String($0.drop(while: { $0 == "@" })) }
         return SavedChannel(handle: handle?.isEmpty == false ? handle! : id, channelId: id,
@@ -163,7 +170,7 @@ actor YouTubeClient {
         }
         if channelId == nil {
             do {
-                let resolved = try await innerTube.call("navigation/resolve_url", ["url": "https://www.youtube.com/@\(handle)"])
+                let resolved = try await innerTube.call("navigation/resolve_url", ["url": "https://www.youtube.com/@\(handle)"], priority: true)
                 channelId = resolved["endpoint"]["browseEndpoint"]["browseId"].string
                     ?? resolved.first("browseId")?.string
             } catch {
@@ -171,7 +178,7 @@ actor YouTubeClient {
             }
         }
         if channelId == nil {
-            if let results = try? await innerTube.call("search", ["query": "@\(handle)", "params": "EgIQAg=="]),
+            if let results = try? await innerTube.call("search", ["query": "@\(handle)", "params": "EgIQAg=="], priority: true),
                let first = results["contents"].all("channelRenderer").first,
                let mapped = Parsers.subscribedChannel(kind: "channelRenderer", node: first) {
                 channelId = mapped.channelId
@@ -181,7 +188,7 @@ actor YouTubeClient {
         }
         guard let channelId else { throw YouTubeError.other("Could not find a channel for @\(handle).") }
 
-        guard let detail = try? await getChannel(channelId) else {
+        guard let detail = try? await getChannel(channelId, priority: true) else {
             return SavedChannel(handle: handle, channelId: channelId, title: title, avatarUrl: avatarUrl)
         }
         return SavedChannel(
@@ -213,7 +220,7 @@ actor YouTubeClient {
         return refreshed
     }
 
-    func getChannelVideos(_ channelId: String, tab: ChannelTab, maxPages: Int = 100, force: Bool = false) async throws -> ChannelVideosPage {
+    func getChannelVideos(_ channelId: String, tab: ChannelTab, maxPages: Int = 100, force: Bool = false, priority: Bool = false) async throws -> ChannelVideosPage {
         let budget = max(1, min(maxPages, 100))
         // Depth is part of the key so a shallow feed result never satisfies a deep channel request.
         let cacheKey = "\(channelId):\(tab.rawValue):\(budget)"
@@ -223,7 +230,7 @@ actor YouTubeClient {
         let response: J
         do {
             response = try await innerTube.call("browse", ["browseId": channelId, "params": Self.tabParams[tab]!],
-                                                label: "\(channelId) \(tab.rawValue)")
+                                                label: "\(channelId) \(tab.rawValue)", priority: priority)
         } catch {
             throw YouTubeError.other("Failed to load \(tab.rawValue): \(error.localizedDescription)")
         }
@@ -246,7 +253,7 @@ actor YouTubeClient {
         // A tab can default to "Popular" instead of "Latest" (owner setting). Force newest-first
         // so recent uploads aren't pushed past the shallow page budget.
         if let latest = Parsers.latestChipToken(selected.content),
-           let resorted = try? await innerTube.call("browse", ["continuation": latest]) {
+           let resorted = try? await innerTube.call("browse", ["continuation": latest], priority: priority) {
             let list = Parsers.continuationItems(resorted)
             if !list.items.isEmpty {
                 log.info("channel \(channelId, privacy: .public) \(tab.rawValue, privacy: .public) defaulted to a non-Latest sort — forced Latest")
@@ -258,7 +265,7 @@ actor YouTubeClient {
         var pages = 1
         var exhausted = page.continuation == nil
         while pages < budget, let token = page.continuation {
-            guard let next = try? await innerTube.call("browse", ["continuation": token], label: "\(channelId) \(tab.rawValue) page \(pages + 1)") else { break }
+            guard let next = try? await innerTube.call("browse", ["continuation": token], label: "\(channelId) \(tab.rawValue) page \(pages + 1)", priority: priority) else { break }
             page = Parsers.continuationItems(next)
             rawItems += page.items
             pages += 1
@@ -275,7 +282,7 @@ actor YouTubeClient {
     func fetchSubscribedChannels() async throws -> [SavedChannel] {
         var page: Parsers.ItemList
         do {
-            page = Parsers.collectItems(try await innerTube.call("browse", ["browseId": "FEchannels"])["contents"])
+            page = Parsers.collectItems(try await innerTube.call("browse", ["browseId": "FEchannels"], priority: true)["contents"])
         } catch {
             throw YouTubeError.other("Failed to load subscriptions: \(error.localizedDescription)")
         }
@@ -298,7 +305,7 @@ actor YouTubeClient {
     // MARK: - Sync
 
     private func editPlaylist(_ playlistId: String, actions: [[String: Any]]) async throws {
-        let result = try await innerTube.call("browse/edit_playlist", ["playlistId": playlistId, "actions": actions])
+        let result = try await innerTube.call("browse/edit_playlist", ["playlistId": playlistId, "actions": actions], priority: true)
         if let status = result["status"].string, status != "STATUS_SUCCEEDED" {
             throw YouTubeError.other("edit_playlist failed with status \(status)")
         }

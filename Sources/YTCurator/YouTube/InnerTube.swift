@@ -4,6 +4,25 @@ import OSLog
 
 let log = Logger(subsystem: "com.delvison.ytcurator", category: "youtube")
 
+/// Plain-text diagnostics in Application Support (unified logging drops info-level messages).
+enum Diagnostics {
+    private static let queue = DispatchQueue(label: "diagnostics")
+    static var url: URL { AppPaths.supportDir.appending(path: "diagnostics.log") }
+
+    static func write(_ message: String) {
+        let line = "\(Date().formatted(.iso8601)) \(message)\n"
+        queue.async {
+            if let handle = try? FileHandle(forWritingTo: url) {
+                handle.seekToEndOfFile()
+                handle.write(Data(line.utf8))
+                try? handle.close()
+            } else {
+                try? Data(line.utf8).write(to: url)
+            }
+        }
+    }
+}
+
 struct YouTubeError: LocalizedError, Sendable {
     enum Kind: Sendable { case notSignedIn, rateLimited, http, youtube, network, missingTab, other }
     var kind: Kind
@@ -24,42 +43,63 @@ struct YouTubeError: LocalizedError, Sendable {
 }
 
 /// InnerTube request gate. YouTube's unofficial endpoints rate-limit (HTTP 429) when the app
-/// fires a burst of calls at once (feed fan-out + avatar refresh + playlist fetch on launch).
-/// Every network call funnels through this small concurrency limiter with minimum spacing.
-/// A throttled playlist fetch is what surfaces as "The playlist does not exist.".
+/// fires a burst of calls at once, so every network call funnels through this limiter.
+/// It's adaptive: it runs at a brisk pace by default and, on the first 429, pauses everything for
+/// a cooldown and then drops to the conservative pace the Glaze app always used (2 at a time,
+/// 300ms apart) for a while before trying the fast pace again. A throttled playlist fetch is
+/// what surfaces as "The playlist does not exist.".
 actor RequestGate {
-    static let maxConcurrency = 2
-    static let minSpacing: Duration = .milliseconds(300)
+    struct Pace { var concurrency: Int; var spacing: Duration }
+    static let fast = Pace(concurrency: 6, spacing: .milliseconds(80))
+    static let safe = Pace(concurrency: 2, spacing: .milliseconds(300))
     /// After a 429, pause ALL requests this long so we don't keep hammering a blocked session.
     static let rateLimitCooldown: Duration = .seconds(30)
+    /// How long to stay at the safe pace after a 429.
+    static let safeModeDuration: Duration = .seconds(600)
 
     private var active = 0
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    /// Served before `waiters`: interactive work (playlist, sync) shouldn't queue behind the feed.
+    private var priorityWaiters: [CheckedContinuation<Void, Never>] = []
     private var nextStart = ContinuousClock.now
     private var rateLimitedUntil = ContinuousClock.now
+    private var safeUntil = ContinuousClock.now
 
-    func acquire() async {
-        if active >= Self.maxConcurrency {
-            await withCheckedContinuation { waiters.append($0) }
+    private var pace: Pace { ContinuousClock.now < safeUntil ? Self.safe : Self.fast }
+
+    func acquire(priority: Bool = false) async {
+        if active >= pace.concurrency {
+            await withCheckedContinuation { c in
+                if priority { priorityWaiters.append(c) } else { waiters.append(c) }
+            }
         } else {
             active += 1
         }
         let now = ContinuousClock.now
         let start = max(now, nextStart, rateLimitedUntil)
-        nextStart = start + Self.minSpacing
+        nextStart = start + pace.spacing
         if start > now { try? await Task.sleep(until: start, clock: .continuous) }
     }
 
     func release() {
-        if waiters.isEmpty {
-            active = max(0, active - 1)
-        } else {
-            waiters.removeFirst().resume()
+        active = max(0, active - 1)
+        wakeIfRoom()
+    }
+
+    /// Hand free slots to queued requests (priority first). Each woken waiter owns one slot, so
+    /// a pace change takes effect as slots free up.
+    private func wakeIfRoom() {
+        while active < pace.concurrency, !(priorityWaiters.isEmpty && waiters.isEmpty) {
+            active += 1
+            (priorityWaiters.isEmpty ? waiters.removeFirst() : priorityWaiters.removeFirst()).resume()
         }
     }
 
     func noteRateLimited() {
-        rateLimitedUntil = ContinuousClock.now + Self.rateLimitCooldown
+        let now = ContinuousClock.now
+        if now >= safeUntil { Diagnostics.write("gate: 429 — cooling down, then safe pace for 10 min") }
+        rateLimitedUntil = now + Self.rateLimitCooldown
+        safeUntil = now + Self.rateLimitCooldown + Self.safeModeDuration
     }
 }
 
@@ -107,6 +147,16 @@ actor InnerTube {
         return nil
     }
 
+    /// GFEEDBACK `logged_in` tracking param: whether YouTube treated the request as signed in.
+    static func loggedInFlag(_ json: J) -> String? {
+        for service in json["responseContext"]["serviceTrackingParams"].array {
+            for param in service["params"].array where param["key"].string == "logged_in" {
+                return param["value"].string
+            }
+        }
+        return nil
+    }
+
     static func sapisidHash(_ sapisid: String, timestamp: Int = Int(Date().timeIntervalSince1970)) -> String {
         let input = "\(timestamp) \(sapisid) \(origin)"
         let digest = Insecure.SHA1.hash(data: Data(input.utf8)).map { String(format: "%02x", $0) }.joined()
@@ -126,15 +176,17 @@ actor InnerTube {
             visitorData = html.firstMatch(of: /"VISITOR_DATA":"([^"]+)"/).map { String($0.1) }
         }
         if clientVersion == nil { clientVersion = Self.fallbackClientVersion }
+        let hasSapisid = Self.cookieValue(cookie, "SAPISID") != nil
+        Diagnostics.write("session: clientVersion=\(clientVersion ?? "?") visitorData=\(visitorData != nil) SAPISID=\(hasSapisid)\n\(await YouTubeSession.shared.cookieSummary())")
         log.info("InnerTube client version \(self.clientVersion ?? "?", privacy: .public)")
     }
 
     /// POST youtubei/v1/<endpoint> through the gate, retrying transient failures.
-    func call(_ endpoint: String, _ body: [String: Any], label: String? = nil) async throws -> J {
+    func call(_ endpoint: String, _ body: [String: Any], label: String? = nil, priority: Bool = false) async throws -> J {
         let maxAttempts = 3
         var lastError: Error = YouTubeError.other("Request failed")
         for attempt in 1...maxAttempts {
-            await gate.acquire()
+            await gate.acquire(priority: priority)
             do {
                 let result = try await perform(endpoint, body)
                 await gate.release()
@@ -198,9 +250,11 @@ actor InnerTube {
         let json = (try? J(data: data)) ?? J(nil)
         if !(200..<300).contains(status) {
             let detail = json["error"]["message"].string ?? HTTPURLResponse.localizedString(forStatusCode: status)
+            Diagnostics.write("\(endpoint) HTTP \(status): \(detail)")
             throw YouTubeError(kind: .http, message: "\(endpoint) failed with status \(status): \(detail)")
         }
         if let alert = Parsers.alertError(json) {
+            Diagnostics.write("\(endpoint) \(body["browseId"] ?? "") alert: \(alert) logged_in=\(Self.loggedInFlag(json) ?? "?")")
             throw YouTubeError(kind: .youtube, message: alert)
         }
         return json
