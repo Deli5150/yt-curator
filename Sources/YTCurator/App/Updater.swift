@@ -238,7 +238,9 @@ final class Updater {
                 throw error
             }
         }
-        Diagnostics.write("update: installed \(Bundle(url: target)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?") over \(Self.currentVersion)")
+        // Read the plist directly: Bundle(url:) returns the cached info of the running bundle.
+        let installed = NSDictionary(contentsOf: target.appending(path: "Contents/Info.plist"))?["CFBundleShortVersionString"] as? String
+        Diagnostics.write("update: installed \(installed ?? "?") over \(Self.currentVersion)")
     }
 
     /// Reopen the (now replaced) bundle once this process has exited, then quit.
