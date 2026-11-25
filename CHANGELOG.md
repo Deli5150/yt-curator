@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1
+
+- Your home feed loads at full speed when YT Curator is in the background or its window is hidden.
+  macOS's App Nap was slowing a cold load down to about half a minute.
+- README screenshots.
+
 ## 1.0.0
 
 First native release: a SwiftUI port of the Glaze YT Curator app.
